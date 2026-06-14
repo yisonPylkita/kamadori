@@ -1,0 +1,26 @@
+REGEDIT4
+
+; First delete existing values to ensure overwrite
+[HKEY_CURRENT_USER\Control Panel\International]
+"Locale"=-
+"LocaleName"=-
+"sLanguage"=-
+
+; Then set Japanese values
+[HKEY_CURRENT_USER\Control Panel\International]
+"Locale"="00000411"
+"LocaleName"="ja-JP"
+"ACP"="932"
+"OEMCP"="932"
+"Country"="81"
+"sLanguage"="JPN"
+
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\age.exe\Locales]
+"LC_ALL"="ja_JP.UTF-8"
+"LC_CTYPE"="ja_JP.UTF-8"
+"LANG"="ja_JP.UTF-8"
+
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\age.exe\International]
+"Locale"="00000411"
+"ACP"="932"
+"OEMCP"="932"

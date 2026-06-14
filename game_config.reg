@@ -1,0 +1,10 @@
+REGEDIT4
+
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\age.exe\X11 Driver]
+"Managed"="Y"
+"VirtualDesktop"="640x480"
+"WindowDecorated"="Y"
+
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\age.exe\DllOverrides]
+"d3d9"="builtin"
+"d3dx9_43"="builtin"
