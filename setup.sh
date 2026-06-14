@@ -6,25 +6,23 @@
 # copies game files, and verifies everything.
 #
 # Usage:
-#   chmod +x setup.sh && ./setup.sh
+#   chmod +x setup.sh && ./setup.sh         # fresh install
+#   chmod +x setup.sh && ./setup.sh --force  # delete & recreate
 #
 # Requirements:
 #   - macOS on Apple Silicon (M1/M2/M3/M4)
 #   - CrossOver 26+ installed in /Applications/CrossOver.app
 #   - Game files extracted in this repository's Kamadori/ directory
 #   - ~10 GB free disk space
-#
-# What it does:
-#   1. Checks prerequisites
-#   2. Creates a "Kamadori" CrossOver bottle (Windows 7 64-bit)
-#   3. Copies game files into the bottle's drive_c
-#   4. Imports Japanese locale registry settings (SHIFT-JIS support)
-#   5. Patches system.reg for Japanese codepages (ACP/OEMCP = 932)
-#   6. Imports game-specific settings (virtual desktop, D3D overrides)
-#   7. Verifies the final setup
 # ==============================================================================
 
 set -euo pipefail
+
+# --- CLI flags ---------------------------------------------------------------
+FORCE=0
+for arg in "$@"; do
+	if [[ "$arg" == "--force" ]]; then FORCE=1; fi
+done
 
 # --- Configuration -----------------------------------------------------------
 BOTTLE_NAME="Kamadori"
@@ -33,7 +31,6 @@ GAME_DIR="$(cd "$(dirname "$0")" && pwd)/Kamadori"
 CROSSOVER_BIN="/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin"
 WINE="$CROSSOVER_BIN/wine"
 CXBOTTLE="$CROSSOVER_BIN/cxbottle"
-REGEDIT="$CROSSOVER_BIN/regedit"
 WINESERVER="$CROSSOVER_BIN/wineserver"
 DEST_DIR="drive_c/Games/Kamadori"
 
@@ -47,12 +44,24 @@ die() {
 	exit 1
 }
 
+# --- Helper: set a registry value via reg.exe (silent) -----------------------
+reg_set() {
+	local key="$1" name="$2" type="$3" value="$4"
+	"$WINE" --bottle "$BOTTLE_NAME" reg.exe add "$key" \
+		/v "$name" /t "$type" /d "$value" /f >/dev/null 2>&1 || true
+}
+
+# --- Helper: run a Python patcher -------------------------------------------
+py_patch() {
+	local script="$1" target="$2"
+	python3 "$(cd "$(dirname "$0")" && pwd)/$script" "$target" 2>&1
+}
+
 # --- Step 0: Prerequisites ---------------------------------------------------
 check_prereqs() {
 	echo ""
 	info "Checking prerequisites..."
 
-	# macOS / Apple Silicon
 	local arch
 	arch=$(uname -m)
 	if [[ "$arch" != "arm64" ]]; then
@@ -60,7 +69,6 @@ check_prereqs() {
 	fi
 	ok "Apple Silicon detected ($arch)"
 
-	# CrossOver
 	if [[ ! -d "/Applications/CrossOver.app" ]]; then
 		die "CrossOver.app not found in /Applications. Please install CrossOver 26+ first."
 	fi
@@ -69,7 +77,6 @@ check_prereqs() {
 	fi
 	ok "CrossOver found at /Applications/CrossOver.app"
 
-	# Game files
 	if [[ ! -d "$GAME_DIR" ]]; then
 		die "Game directory not found at $GAME_DIR. Ensure Kamadori/ exists alongside this script."
 	fi
@@ -78,7 +85,6 @@ check_prereqs() {
 	fi
 	ok "Game files found in $GAME_DIR"
 
-	# Disk space (rough check: ~3 GB free)
 	local available_kb
 	available_kb=$(df "$HOME" | awk 'NR==2 {print $4}')
 	local available_gb=$((available_kb / 1024 / 1024))
@@ -88,15 +94,21 @@ check_prereqs() {
 		ok "Disk space: ${available_gb} GB free"
 	fi
 
-	# Bottle not already existing
 	if [[ -d "$BOTTLE_DIR" ]]; then
-		warn "Bottle '$BOTTLE_NAME' already exists at:"
-		echo "       $BOTTLE_DIR"
-		echo "       Delete it first or rename it, then re-run."
-		echo "       To delete:  rm -rf \"$BOTTLE_DIR\""
-		die "Aborting to avoid overwriting an existing bottle."
+		if ((FORCE)); then
+			warn "Bottle '$BOTTLE_NAME' exists — removing (--force)..."
+			$WINESERVER -k 2>/dev/null || true
+			sleep 1
+			rm -rf "$BOTTLE_DIR"
+			ok "Old bottle removed"
+		else
+			warn "Bottle '$BOTTLE_NAME' already exists at:"
+			echo "       $BOTTLE_DIR"
+			echo "       To delete:  rm -rf \"$BOTTLE_DIR\""
+			warn "Or use:  ./setup.sh --force"
+			die "Aborting to avoid overwriting an existing bottle."
+		fi
 	fi
-
 	echo ""
 }
 
@@ -117,92 +129,129 @@ copy_game_files() {
 	info "Copying game files to bottle..."
 	local dest="$BOTTLE_DIR/$DEST_DIR"
 	mkdir -p "$dest"
-	# Use rsync to copy everything excluding Backup/ and patch/ if you want a clean install.
-	# Include all files: game data, patch-overridden EXE/DLL, etc.
-	echo "       Copying game files (this may take a minute)..."
-	rsync -a --progress "$GAME_DIR/" "$dest/" \
-		--exclude "Backup/" \
-		--exclude "patch/"
-	ok "Game files copied to C:\\Games\\Kamadori"
-	echo ""
-}
 
-# --- Step 3: Import Japanese Locale ------------------------------------------
-import_jp_locale() {
-	info "Importing Japanese locale registry via regedit..."
-	local reg_src
-	reg_src="$(cd "$(dirname "$0")" && pwd)/jp_locale.reg"
-	if [[ ! -f "$reg_src" ]]; then
-		die "jp_locale.reg not found alongside this script."
+	# Phase 1: Copy root game files (excluding Backup/ metadata)
+	local root_count
+	root_count=$(find "$GAME_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+
+	echo -n "       Copying $root_count root files... "
+	rsync -a "$GAME_DIR/" "$dest/" \
+		--exclude "Backup/" --exclude "patch/" 2>/dev/null &
+	local pid1=$!
+
+	local spin='-\|/' i=0
+	while kill -0 "$pid1" 2>/dev/null; do
+		i=$(((i + 1) % 4))
+		echo -ne "\b${spin:$i:1}"
+		sleep 0.2
+	done
+	wait "$pid1" 2>/dev/null || true
+
+	# Phase 2: Apply English patch files from patch/ directory (overwrites originals)
+	local patch_dir="$GAME_DIR/patch"
+	if [[ -d "$patch_dir" ]]; then
+		local patch_count
+		patch_count=$(find "$patch_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+		echo -ne "\b, applying $patch_count English patch files... "
+		rsync -a "$patch_dir/" "$dest/" 2>/dev/null &
+		local pid2=$!
+
+		i=0
+		while kill -0 "$pid2" 2>/dev/null; do
+			i=$(((i + 1) % 4))
+			echo -ne "\b${spin:$i:1}"
+			sleep 0.2
+		done
+		wait "$pid2" 2>/dev/null || true
 	fi
-	cp "$reg_src" "$BOTTLE_DIR/drive_c/"
-	"$REGEDIT" --bottle "$BOTTLE_NAME" "C:\\jp_locale.reg" 2>/dev/null || true
 
-	# Kill wineserver
-	"$CROSSOVER_BIN/wineserver" -k 2>/dev/null || true
-
-	ok "Japanese locale imported"
+	echo -e "\b done"
+	ok "Game files + English patch applied to C:\\Games\\Kamadori"
 	echo ""
 }
-# --- Step 4: Patch system.reg for Codepages ----------------------------------
+
+# --- Step 3: Set Japanese locale ---------------------------------------------
+import_jp_locale() {
+	info "Setting Japanese locale..."
+
+	$WINESERVER -k 2>/dev/null || true
+	sleep 1
+	py_patch "patch_user_reg_jp.py" "$BOTTLE_DIR/user.reg"
+
+	reg_set "HKCU\\Control Panel\\International" ACP REG_SZ "932"
+	reg_set "HKCU\\Control Panel\\International" OEMCP REG_SZ "932"
+	reg_set "HKCU\\Control Panel\\International" sLanguage REG_SZ "JPN"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\International" Locale REG_SZ "00000411"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\International" ACP REG_SZ "932"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\International" OEMCP REG_SZ "932"
+
+	ok "Japanese locale set"
+	echo ""
+}
+
+# --- Step 4: Patch system.reg for codepages ----------------------------------
 patch_system_reg() {
 	info "Patching system.reg for Japanese codepages..."
-	local sysreg="$BOTTLE_DIR/system.reg"
-	local script_dir
-	script_dir="$(cd "$(dirname "$0")" && pwd)"
-
-	if [[ ! -f "$sysreg" ]]; then
-		die "system.reg not found in bottle — something went wrong during creation."
-	fi
-
-	# wineserver is already dead from previous step; patch directly
-	python3 "$script_dir/patch_codepages.py" "$sysreg" 2>&1
-
+	py_patch "patch_codepages.py" "$BOTTLE_DIR/system.reg"
 	ok "system.reg patched with Japanese codepages"
 	echo ""
 }
 
-# --- Step 5: Import Game Config (Virtual Desktop, D3D) -----------------------
+# --- Step 5: Set game config (Virtual Desktop, D3D) --------------------------
 import_game_config() {
-	info "Importing game-specific config (Virtual Desktop, D3D overrides)..."
-	local reg_src
-	reg_src="$(cd "$(dirname "$0")" && pwd)/game_config.reg"
-	if [[ ! -f "$reg_src" ]]; then
-		die "game_config.reg not found alongside this script."
-	fi
+	info "Setting game config (Virtual Desktop, D3D overrides)..."
 
-	# Use regedit to import game config
-	cp "$reg_src" "$BOTTLE_DIR/drive_c/"
-	"$REGEDIT" --bottle "$BOTTLE_NAME" "C:\\game_config.reg" 2>/dev/null
+	$WINESERVER -k 2>/dev/null || true
+	sleep 1
+	py_patch "patch_game_config.py" "$BOTTLE_DIR/user.reg"
 
-	# Kill wineserver
-	"$CROSSOVER_BIN/wineserver" -k 2>/dev/null || true
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\X11 Driver" VirtualDesktop REG_SZ "640x480"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\X11 Driver" Managed REG_SZ "Y"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\X11 Driver" WindowDecorated REG_SZ "Y"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\DllOverrides" d3d9 REG_SZ "builtin"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\DllOverrides" d3dx9_43 REG_SZ "builtin"
 
-	ok "Game config imported"
+	ok "Game config set"
 	echo ""
 }
 
-# --- Step 6: Verification ----------------------------------------------------
+# --- Step 6: Verify ----------------------------------------------------------
 verify() {
 	echo ""
-	info "Verifying bottle configuration..."
+	info "Verifying and finalizing bottle configuration..."
 
-	# Kill wineserver so we can safely finalize registry files
-	"$CROSSOVER_BIN/wineserver" -k 2>/dev/null || true
+	# Phase 1: Patch user.reg while wineserver is dead
+	$WINESERVER -k 2>/dev/null || true
 	sleep 1
 
-	# Now that wineserver is dead, apply all remaining patches directly
-	local script_dir
-	script_dir="$(cd "$(dirname "$0")" && pwd)"
-	python3 "$script_dir/patch_user_reg_jp.py" "$BOTTLE_DIR/user.reg"
-	python3 "$script_dir/patch_codepages.py" "$BOTTLE_DIR/system.reg" 2>&1
+	py_patch "patch_user_reg_jp.py" "$BOTTLE_DIR/user.reg"
+	py_patch "patch_game_config.py" "$BOTTLE_DIR/user.reg"
 
-	# Remove wineserver state so old data can't be resurrected later
+	# Phase 2: Load user values into wineserver memory via reg.exe
+	reg_set "HKCU\\Control Panel\\International" ACP REG_SZ "932"
+	reg_set "HKCU\\Control Panel\\International" OEMCP REG_SZ "932"
+	reg_set "HKCU\\Control Panel\\International" sLanguage REG_SZ "JPN"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\Locales" LANG REG_SZ "ja_JP.UTF-8"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\Locales" LC_ALL REG_SZ "ja_JP.UTF-8"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\Locales" LC_CTYPE REG_SZ "ja_JP.UTF-8"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\International" Locale REG_SZ "00000411"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\International" ACP REG_SZ "932"
+	reg_set "HKCU\\Software\\Wine\\AppDefaults\\age.exe\\International" OEMCP REG_SZ "932"
+
+	$WINESERVER -k 2>/dev/null || true
+	$WINESERVER -w 2>/dev/null || true
+	sleep 2
+	py_patch "patch_codepages.py" "$BOTTLE_DIR/system.reg"
+	$WINESERVER -k 2>/dev/null || true
+	sleep 1
+	py_patch "patch_codepages.py" "$BOTTLE_DIR/system.reg"
+	py_patch "patch_codepages.py" "$BOTTLE_DIR/system.reg"
+
 	rm -f "$BOTTLE_DIR/.update-timestamp" 2>/dev/null || true
-	rm -f "$BOTTLE_DIR/dosdevices/*:wineserver" 2>/dev/null || true
+
 	local errors=0
 
-	# Check template
+	# Checks
 	if grep -q '"Template" = "win7_64"' "$BOTTLE_DIR/cxbottle.conf"; then
 		ok "Template: Windows 7 64-bit"
 	else
@@ -210,7 +259,6 @@ verify() {
 		errors=$((errors + 1))
 	fi
 
-	# Check game files exist
 	if [[ -f "$BOTTLE_DIR/$DEST_DIR/age.exe" ]] && [[ -f "$BOTTLE_DIR/$DEST_DIR/agerc.dll" ]]; then
 		ok "Game files present"
 	else
@@ -218,15 +266,13 @@ verify() {
 		errors=$((errors + 1))
 	fi
 
-	# Check Japanese locale in user.reg
 	if grep -q '00000411' "$BOTTLE_DIR/user.reg" && grep -q 'ja_JP.UTF-8' "$BOTTLE_DIR/user.reg"; then
 		ok "Japanese locale set in user.reg"
 	else
-		err "Japanese locale not found in user.reg — run jp_locale import"
+		err "Japanese locale not found in user.reg"
 		errors=$((errors + 1))
 	fi
 
-	# Check codepages in system.reg
 	if grep -q '"ACP"="932"' "$BOTTLE_DIR/system.reg" && grep -q '"OEMCP"="932"' "$BOTTLE_DIR/system.reg"; then
 		ok "Japanese codepages set in system.reg"
 	else
@@ -234,7 +280,6 @@ verify() {
 		errors=$((errors + 1))
 	fi
 
-	# Check virtual desktop config
 	if grep -q 'VirtualDesktop' "$BOTTLE_DIR/user.reg"; then
 		ok "Virtual Desktop configured"
 	else
@@ -242,7 +287,7 @@ verify() {
 	fi
 
 	if ((errors > 0)); then
-		die "$errors verification check(s) failed. Review the output above."
+		die "$errors verification check(s) failed. Review above."
 	fi
 
 	echo ""
@@ -262,17 +307,36 @@ verify() {
 	echo "    5. Click Run"
 	echo ""
 	echo "  To launch via Terminal:"
-	echo "    $WINE \"$BOTTLE_DIR/$DEST_DIR/age.exe\""
+	echo "    cd \"$BOTTLE_DIR/$DEST_DIR\""
+	echo "    LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 LC_MESSAGES=ja_JP.UTF-8 \\"
+	echo "      $WINE --bottle $BOTTLE_NAME --no-wait age.exe"
+	echo ""
+	echo "    (The game must be launched from its own directory. The LC_ALL"
+	echo "     environment variable is required for proper Japanese text display.)"
 	echo ""
 	echo "============================================="
 }
 
 # --- Main --------------------------------------------------------------------
+usage() {
+	echo "Usage: $(basename "$0") [--force]"
+	echo ""
+	echo "  --force    Remove existing bottle and recreate from scratch"
+	exit 0
+}
+
 main() {
 	echo ""
 	echo "╔═══════════════════════════════════════════════╗"
 	echo "║   Kamidori Alchemy Meister — macOS Setup      ║"
 	echo "╚═══════════════════════════════════════════════╝"
+
+	for arg in "$@"; do
+		if [[ "$arg" != "--force" ]]; then
+			echo "Unknown option: $arg"
+			usage
+		fi
+	done
 
 	check_prereqs
 	create_bottle

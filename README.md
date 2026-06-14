@@ -163,10 +163,17 @@ Check in `system.reg` that `CurrentVersion` is `"6.1"` (Windows 7) and in `[Cont
 ### Via Terminal:
 
 ```bash
-BOTTLE="$HOME/Library/Application Support/CrossOver/Bottles/Kamadori"
-/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine \
-  "$BOTTLE/drive_c/Games/Kamadori/age.exe"
+cd "$HOME/Library/Application Support/CrossOver/Bottles/Kamadori/drive_c/Games/Kamadori"
+LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 LC_MESSAGES=ja_JP.UTF-8 \
+  /Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine \
+  --bottle Kamadori \
+  --no-wait \
+  age.exe
 ```
+
+> **Important:** The game must be launched from its own directory.
+> The `LC_ALL=ja_JP.UTF-8` is required because Wine on macOS cannot change
+> the locale internally. Without it, system dialogs show garbled Shift-JIS text.
 
 ---
 
