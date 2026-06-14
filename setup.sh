@@ -251,55 +251,7 @@ install_japanese_fonts() {
 
 	# Update font substitutions in user.reg to use IPAex fonts
 	$WINESERVER -k 2>/dev/null || true
-	python3 "$(cd "$(dirname "$0")" && pwd)/patch_game_config.py" "$BOTTLE_DIR/user.reg" 2>/dev/null || true
-	python3 -c "
-path = '$BOTTLE_DIR/user.reg'
-with open(path) as f:
-    text = f.read()
-
-section = r'[Software\\Wine\\Fonts\\External Fonts]'
-font_map = {
-    'MS Gothic': 'IPAex Gothic',
-    'MS PGothic': 'IPAex Gothic',
-    'MS UI Gothic': 'IPAex Gothic',
-    'MS Mincho': 'IPAex Mincho',
-}
-
-if section not in text:
-    text += '\n' + section + '\n'
-    for old, new in font_map.items():
-        text += f'\"{old}\"=\"{new}\"\n'
-else:
-    import re
-    sec_pat = re.compile(re.escape(section))
-    m = sec_pat.search(text)
-    rest = text[m.end():]
-    next_sec = re.search(r'^\[', rest, re.MULTILINE)
-    body = rest[:next_sec.start()] if next_sec else rest
-    end = m.end() + next_sec.start() if next_sec else len(text)
-    lines = body.split('\n')
-    new_lines = []
-    done = set()
-    for line in lines:
-        matched = False
-        for old, new in font_map.items():
-            if line.startswith(f'\"{old}\"='):
-                new_lines.append(f'\"{old}\"=\"{new}\"')
-                done.add(old)
-                matched = True
-                break
-        if not matched:
-            new_lines.append(line)
-    for old, new in font_map.items():
-        if old not in done:
-            new_lines.insert(1, f'\"{old}\"=\"{new}\"')
-    new_body = '\n'.join(new_lines)
-    text = text[:m.end()] + new_body + text[end:]
-
-with open(path, 'w') as f:
-    f.write(text)
-print('Font substitutions updated')
-"
+	python3 "$(cd "$(dirname "$0")" && pwd)/patch_fonts.py" "$BOTTLE_DIR/user.reg"
 	ok "Japanese fonts configured"
 	echo ""
 }

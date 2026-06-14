@@ -72,7 +72,7 @@ def set_section_values(text, section_header, fix_map):
             insert_idx += 1
 
     new_body = "\n".join(new_lines)
-    return text[: section_match.end()] + new_body + text[end:]
+    return text[: section_match.end()] + '\n' + new_body + text[end:]
 
 
 def patch_user_reg(path):

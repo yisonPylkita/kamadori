@@ -80,7 +80,7 @@ def patch_system_reg(path: str) -> bool:
             new_lines.insert(insert_idx, '"MACCP"="10001"')
 
     new_body = "\n".join(new_lines)
-    text = text[: section_match.end()] + new_body + text[section_end:]
+    text = text[: section_match.end()] + '\n' + new_body + text[section_end:]
 
     with open(path, "w") as f:
         f.write(text)
