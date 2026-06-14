@@ -215,7 +215,96 @@ import_game_config() {
 	echo ""
 }
 
-# --- Step 6: Verify ----------------------------------------------------------
+# --- Step 6: Install Japanese fonts -----------------------------------------
+install_japanese_fonts() {
+	info "Installing Japanese IPAex fonts..."
+	local font_dir="$BOTTLE_DIR/drive_c/windows/Fonts"
+	mkdir -p "$font_dir"
+
+	# IPAex fonts are freely licensed Japanese fonts
+	local ipaex_g="$font_dir/ipaexg.ttf"
+	local ipaex_m="$font_dir/ipaexm.ttf"
+
+	if [[ -f "$ipaex_g" && -f "$ipaex_m" ]]; then
+		ok "IPAex fonts already installed"
+	else
+		local tmp_dir
+		local zip_path
+		tmp_dir=$(mktemp -d)
+		zip_path="$tmp_dir/ipa.zip"
+
+		if curl -sL "https://moji.or.jp/wp-content/ipafont/IPAexfont/IPAexfont00401.zip" -o "$zip_path" 2>/dev/null && [[ -s "$zip_path" ]]; then
+			unzip -q -o "$zip_path" -d "$tmp_dir/extracted" 2>/dev/null
+			cp "$tmp_dir/extracted"/*/ipaexg.ttf "$font_dir/" 2>/dev/null || true
+			cp "$tmp_dir/extracted"/*/ipaexm.ttf "$font_dir/" 2>/dev/null || true
+			rm -rf "$tmp_dir"
+		fi
+
+		if [[ -f "$ipaex_g" && -f "$ipaex_m" ]]; then
+			ok "IPAex fonts installed"
+		else
+			warn "Could not download IPAex fonts — game may crash on text rendering"
+			warn "Manual install: place ipaexg.ttf and ipaexm.ttf in:"
+			warn "  $font_dir"
+		fi
+	fi
+
+	# Update font substitutions in user.reg to use IPAex fonts
+	$WINESERVER -k 2>/dev/null || true
+	python3 "$(cd "$(dirname "$0")" && pwd)/patch_game_config.py" "$BOTTLE_DIR/user.reg" 2>/dev/null || true
+	python3 -c "
+path = '$BOTTLE_DIR/user.reg'
+with open(path) as f:
+    text = f.read()
+
+section = r'[Software\\Wine\\Fonts\\External Fonts]'
+font_map = {
+    'MS Gothic': 'IPAex Gothic',
+    'MS PGothic': 'IPAex Gothic',
+    'MS UI Gothic': 'IPAex Gothic',
+    'MS Mincho': 'IPAex Mincho',
+}
+
+if section not in text:
+    text += '\n' + section + '\n'
+    for old, new in font_map.items():
+        text += f'\"{old}\"=\"{new}\"\n'
+else:
+    import re
+    sec_pat = re.compile(re.escape(section))
+    m = sec_pat.search(text)
+    rest = text[m.end():]
+    next_sec = re.search(r'^\[', rest, re.MULTILINE)
+    body = rest[:next_sec.start()] if next_sec else rest
+    end = m.end() + next_sec.start() if next_sec else len(text)
+    lines = body.split('\n')
+    new_lines = []
+    done = set()
+    for line in lines:
+        matched = False
+        for old, new in font_map.items():
+            if line.startswith(f'\"{old}\"='):
+                new_lines.append(f'\"{old}\"=\"{new}\"')
+                done.add(old)
+                matched = True
+                break
+        if not matched:
+            new_lines.append(line)
+    for old, new in font_map.items():
+        if old not in done:
+            new_lines.insert(1, f'\"{old}\"=\"{new}\"')
+    new_body = '\n'.join(new_lines)
+    text = text[:m.end()] + new_body + text[end:]
+
+with open(path, 'w') as f:
+    f.write(text)
+print('Font substitutions updated')
+"
+	ok "Japanese fonts configured"
+	echo ""
+}
+
+# --- Step 7: Verify ----------------------------------------------------------
 verify() {
 	echo ""
 	info "Verifying and finalizing bottle configuration..."
@@ -344,6 +433,7 @@ main() {
 	import_jp_locale
 	patch_system_reg
 	import_game_config
+	install_japanese_fonts
 	verify
 }
 
